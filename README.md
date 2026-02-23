@@ -10,7 +10,6 @@ A [Claude Code](https://docs.anthropic.com/en/docs/claude-code) custom slash com
 - Export results to CSV with standardized columns
 - Append new findings to existing CSV without duplicates (DOI-based dedup)
 - Annotate each reference with up to 5 context-specific insights (`whats_interesting1`–`5`)
-- Non-PubMed references use em dash (`—`) as PubMed_ID
 
 ## Requirements
 
@@ -40,28 +39,11 @@ In Claude Code, use the slash command:
 /codex_ref_finder
 ```
 
-Or trigger it with natural language:
-
-- "論文検索" (paper search)
-- "文献検索" (literature search)
-
-### Example prompts
-
-```
-「sleep disturbance and suicide」に関する論文をPubMedから検索して、CSVファイルに保存してください。
-```
-
-```
-以下の論文をPubMedから検索してCSVに追記してください:
-(1) Herring et al. 2016 Ann Intern Med suvorexant
-(2) Mignot et al. 2022 Lancet Neurol daridorexant
-```
-
 ## CSV columns
 
 | Column | Description |
 |---|---|
-| PubMed_ID | PMID. Em dash (`—`) if not indexed in PubMed |
+| PubMed_ID | PMID |
 | Author | Author names (semicolon-separated) |
 | Year | Publication year |
 | Title | Article title |
