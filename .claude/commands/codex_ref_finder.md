@@ -36,9 +36,101 @@ CSV列: PubMed_ID, Author, Year, Title, Journal, Volume, Issue, Pages, doi, abst
 - 重複論文が見つかった場合は行を追加せず、既存行の次の空きwhats_interesting列に新しい知見を追記すること
 ```
 
+## 並列実行時のルール（重要）
+
+複数のcodex検索を並列実行する場合、同じCSVファイルに同時に書き込むとレースコンディション（競合状態）が発生し、データが消失する。これを防ぐため、以下のルールに従う。
+
+### 並列実行の流れ
+
+1. **各codex検索は個別の一時CSVに書き出す**
+   - ファイル名: `_tmp_refs_<連番またはテーマ>.csv`（例: `_tmp_refs_01.csv`, `_tmp_refs_circadian.csv`）
+   - 各codexプロセスは自分専用の一時CSVのみに書き込む
+   - 既存のメインCSVには直接書き込まない
+
+2. **全codex検索が完了した後に、メインプロセスでマージする**
+   - メインCSV（例: `refs_YYYYMMDD.csv`）を読み込む
+   - 各一時CSVを順番に読み込む
+   - DOIで重複チェック → 新規論文は行追加、既存論文はwhats_interesting列に追記
+   - マージ完了後、一時CSVファイルを削除する
+
+3. **マージ処理はClaude Code本体（親プロセス）が行う**
+   - codex（子プロセス）にはマージさせない
+   - マージ処理はPythonスクリプトとして実装し、順次処理する
+
+### 並列実行時の検索リクエスト形式
+
+```
+「<検索キーワード>」に関する論文をPubMedから検索して、CSVファイルに保存してください。
+
+保存先: _tmp_refs_<連番>.csv（新規作成）
+注意: 既存のメインCSVには書き込まないこと。一時ファイルに新規作成のみ。
+
+CSV列: PubMed_ID, Author, Year, Title, Journal, Volume, Issue, Pages, doi, abstract, whats_interesting1, whats_interesting2, whats_interesting3, whats_interesting4, whats_interesting5
+- whats_interesting1に検索文脈に関連した知見を記載
+
+重要: Pythonスクリプトを一時ファイルとして書き出してから実行すること。
+```
+
+### マージ処理のPythonテンプレート
+
+```python
+import csv
+import glob
+import os
+
+MAIN_CSV = 'refs_YYYYMMDD.csv'
+TMP_PATTERN = '_tmp_refs_*.csv'
+FIELDNAMES = ['PubMed_ID', 'Author', 'Year', 'Title', 'Journal', 'Volume', 'Issue', 'Pages', 'doi', 'abstract', 'whats_interesting1', 'whats_interesting2', 'whats_interesting3', 'whats_interesting4', 'whats_interesting5']
+WI_COLS = ['whats_interesting1', 'whats_interesting2', 'whats_interesting3', 'whats_interesting4', 'whats_interesting5']
+
+# 1. メインCSV読み込み
+rows = []
+doi_index = {}
+if os.path.exists(MAIN_CSV):
+    with open(MAIN_CSV, 'r', encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            rows.append(row)
+            if row.get('doi'):
+                doi_index[row['doi']] = len(rows) - 1
+
+# 2. 各一時CSVをマージ
+tmp_files = sorted(glob.glob(TMP_PATTERN))
+for tmp_file in tmp_files:
+    with open(tmp_file, 'r', encoding='utf-8-sig') as f:
+        reader = csv.DictReader(f)
+        for new_row in reader:
+            doi = new_row.get('doi', '')
+            if doi and doi in doi_index:
+                # 既存論文 → 次の空きwhats_interesting列に追記
+                existing = rows[doi_index[doi]]
+                for col in WI_COLS:
+                    if not existing.get(col):
+                        existing[col] = new_row.get('whats_interesting1', '')
+                        break
+            else:
+                # 新規論文 → 行追加
+                rows.append(new_row)
+                if doi:
+                    doi_index[doi] = len(rows) - 1
+
+# 3. メインCSVに書き出し
+with open(MAIN_CSV, 'w', encoding='utf-8', newline='') as f:
+    writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({k: row.get(k, '') for k in FIELDNAMES})
+
+# 4. 一時ファイル削除
+for tmp_file in tmp_files:
+    os.remove(tmp_file)
+
+print(f'Merged {len(tmp_files)} temp files. Total entries: {len(rows)}')
+```
+
 ## 使用例
 
-### 基本的な文献検索
+### 基本的な文献検索（単発実行）
 ```bash
 codex exec --full-auto --sandbox danger-full-access --skip-git-repo-check --cd "C:\path\to\project" "「腸内細菌叢とうつ病」に関する論文をPubMedから検索して、CSVファイルに保存してください。保存先: manuscripts/refs.csv。保存方法: 既存CSVがあればdoiで重複チェックし、既存論文は次の空きwhats_interesting列に追記、新規論文は行追加。CSV列: PubMed_ID, Author, Year, Title, Journal, Volume, Issue, Pages, doi, abstract, whats_interesting1, whats_interesting2, whats_interesting3, whats_interesting4, whats_interesting5。whats_interesting1に検索文脈「腸内細菌叢とうつ病」に関連した知見を記載。重要: Pythonスクリプトを一時ファイルとして書き出してから実行すること。PowerShellのhere-stringやパイプ経由のPython実行は禁止。"
 ```
@@ -47,6 +139,18 @@ codex exec --full-auto --sandbox danger-full-access --skip-git-repo-check --cd "
 ```bash
 codex exec --full-auto --sandbox danger-full-access --skip-git-repo-check --cd "C:\path\to\project" "以下の論文をPubMedから検索してCSVに追記してください: (1) Herring et al. 2016 Ann Intern Med suvorexant, (2) Mignot et al. 2022 Lancet Neurol daridorexant。保存先: manuscripts/refs.csv。保存方法: doiで重複チェックし、既存論文は次の空きwhats_interesting列に追記、新規論文は行追加。CSV列: PubMed_ID, Author, Year, Title, Journal, Volume, Issue, Pages, doi, abstract, whats_interesting1, whats_interesting2, whats_interesting3, whats_interesting4, whats_interesting5。whats_interesting列に検索文脈「DORA RCT」に関連した知見を記載。重要: Pythonスクリプトを一時ファイルとして書き出してから実行すること。"
 ```
+
+### 並列実行（複数テーマを同時検索）
+各codexには個別の一時CSVを指定する:
+```bash
+# 検索1
+codex exec ... "「VLPO sleep regulation」に関する論文を検索。保存先: _tmp_refs_01.csv（新規作成）。..."
+# 検索2
+codex exec ... "「amygdala prefrontal sleep deprivation」に関する論文を検索。保存先: _tmp_refs_02.csv（新規作成）。..."
+# 検索3
+codex exec ... "「circadian rhythm bipolar disorder」に関する論文を検索。保存先: _tmp_refs_03.csv（新規作成）。..."
+```
+全完了後にマージスクリプトを実行してメインCSVに統合する。
 
 ## CSV列定義
 
@@ -74,8 +178,11 @@ codex exec --full-auto --sandbox danger-full-access --skip-git-repo-check --cd "
 
 1. ユーザーから検索キーワード（またはリクエスト内容）とCSVファイル名を受け取る
 2. プロジェクトディレクトリのパスを確認する
-3. 上記コマンド形式でCodexを実行
-4. 生成されたCSVファイルの行数を確認して結果を報告
+3. 並列実行が必要か判断する
+   - **単発実行**: メインCSVに直接書き込み
+   - **並列実行**: 各codexは `_tmp_refs_<連番>.csv` に個別出力 → 全完了後にマージ
+4. 上記コマンド形式でCodexを実行
+5. 生成されたCSVファイルの行数を確認して結果を報告
 
 ## 注意事項
 
@@ -95,3 +202,8 @@ Codexは内部でPowerShellを使用するため、以下のパターンでエ�
   2. 新規検索結果のdoiが既存に含まれていれば、その行の次の空きwhats_interesting列に知見を追記
   3. 新規論文（doiが一致しない）は新しい行として追加
 - doiが空欄の論文は常に新規行として追加する
+
+### 並列実行時のレースコンディション防止
+- **絶対に複数のcodexプロセスが同じCSVファイルに同時書き込みしない**
+- 並列実行時は必ず個別の一時CSVに出力し、全完了後にマージする
+- マージ処理は親プロセス（Claude Code本体）が順次実行する
