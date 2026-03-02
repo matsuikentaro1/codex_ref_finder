@@ -1,6 +1,6 @@
 ---
 name: codex_ref_finder
-description: Search academic references (primarily via PubMed) using OpenAI Codex CLI and export to CSV. Triggers: "論文検索", "文献検索", "codex_ref_finder", "/codex_ref_finder"
+description: Search academic references (primarily via PubMed) using OpenAI Codex CLI and export to CSV. Triggers: "論文検索", "文献検索", "文脈検索", "コンテキスト検索", "原稿の引用を探して", "codex_ref_finder", "/codex_ref_finder"
 ---
 # Codex Ref Finder
 Codex CLIを使用して学術文献を検索し、結果をCSVファイルに保存するスキル。PubMedを主な検索ソースとするが、PubMed未掲載の文献（書籍、ガイドライン、プレプリント等）も対象とする。
@@ -128,6 +128,79 @@ for tmp_file in tmp_files:
 print(f'Merged {len(tmp_files)} temp files. Total entries: {len(rows)}')
 ```
 
+## コンテキスト認識検索モード
+
+原稿テキストに含まれる引用マーカーの前後の文脈を分析し、各引用に最適な論文を検索するモード。キーワードだけでなく「なぜその引用が必要か」を理解してから検索するため、的中率が高い。
+
+### 実行手順
+
+1. ユーザーから原稿テキスト（引用マーカー付き）とCSVファイル名を受け取る
+2. **Claude Codeがコンテキスト分析を行う**（codex呼び出し前）:
+   a. テキスト中の引用マーカーを検出する
+      - 対応パターン: `<sup>N)</sup>`, `[要引用]`, `[要引用N]`, `[ref]`, `[citation needed]`, `N)` など
+   b. 各引用マーカーの**直前テキスト**から以下を抽出・推論する:
+      - **原文の主張**: どのような事実・知見を述べているか
+      - **必要なエビデンスの種類**: RCT、メタアナリシス、コホート研究、レビュー、基礎研究等
+      - **検索キーワード（英語）**: PubMed検索に適した英語キーワード
+      - **whats_interesting記載方針**: CSVのwhats_interesting列に何を書くべきか
+   c. 検索インテントを構造化して出力する（下記テンプレート参照）
+3. 検索インテントに基づいてcodexを実行する
+   - 引用数が3件以下: 単発実行
+   - 引用数が4件以上: 並列実行（既存の並列実行ルールを適用）
+4. 生成されたCSVを確認し、結果を報告する
+
+### コンテキスト分析の出力テンプレート
+
+Claude Codeがcodex呼び出し前に生成する中間出力:
+
+```
+## 検索インテント
+
+### 引用 [1]
+- 原文の主張: 「VLPOを中心とした睡眠促進系とオレキシン神経系を中心とした覚醒促進系の相互抑制機構」
+- 必要なエビデンス: レビュー論文または基礎神経科学研究
+- 検索キーワード（英語）: "VLPO sleep-wake regulation flip-flop switch hypothalamus"
+- whats_interesting記載方針: 睡眠促進系と覚醒促進系の相互抑制機構（フリップフロップモデル）を提唱または実証した研究であることを記載
+
+### 引用 [2]
+- 原文の主張: 「扁桃体・前頭前皮質・前帯状皮質のネットワークが情動制御に重要」
+- 必要なエビデンス: レビュー論文またはfMRI研究
+- 検索キーワード（英語）: "amygdala prefrontal cortex anterior cingulate emotional regulation"
+- whats_interesting記載方針: 扁桃体-前頭前皮質ネットワークによる情動制御機構を示した研究であることを記載
+```
+
+### 検索リクエストの形式（コンテキスト認識版）
+
+```
+以下の学術論文の文脈に基づいて、適切な引用文献をPubMedから検索してCSVに保存してください。
+
+## 検索コンテキスト
+原稿の分野: <例: 精神医学、睡眠医学>
+対象読者: <例: 精神科医向け日本語総説>
+
+## 検索対象
+### 引用 [1]
+原文の主張: <主張の要約>
+必要なエビデンス: <研究デザインの種類>
+検索キーワード: "<英語キーワード>"
+whats_interesting記載方針: <記載すべき観点>
+
+### 引用 [2]
+（同様の構造）
+
+保存先: <ファイルパス>
+保存方法: 既存のCSVファイルがある場合は行を追加して追記、ない場合は新規作成
+
+CSV列: PubMed_ID, Author, Year, Title, Journal, Volume, Issue, Pages, doi, abstract, whats_interesting1, whats_interesting2, whats_interesting3, whats_interesting4, whats_interesting5
+- whats_interesting1には上記「whats_interesting記載方針」に基づく具体的な知見を記載
+- 各引用に対して最も適切な論文を1〜3件ずつ検索すること
+- 各引用の検索キーワードで検索し、原文の主張を最もよく裏付ける論文を選ぶこと
+
+重要な実装指示:
+- Pythonスクリプトを一時ファイルとして書き出してからpythonで実行すること
+- PowerShellのhere-stringやパイプ経由のPython実行は禁止
+```
+
 ## 使用例
 
 ### 基本的な文献検索（単発実行）
@@ -139,6 +212,34 @@ codex exec --full-auto --sandbox danger-full-access --skip-git-repo-check --cd "
 ```bash
 codex exec --full-auto --sandbox danger-full-access --skip-git-repo-check --cd "C:\path\to\project" "以下の論文をPubMedから検索してCSVに追記してください: (1) Herring et al. 2016 Ann Intern Med suvorexant, (2) Mignot et al. 2022 Lancet Neurol daridorexant。保存先: manuscripts/refs.csv。保存方法: doiで重複チェックし、既存論文は次の空きwhats_interesting列に追記、新規論文は行追加。CSV列: PubMed_ID, Author, Year, Title, Journal, Volume, Issue, Pages, doi, abstract, whats_interesting1, whats_interesting2, whats_interesting3, whats_interesting4, whats_interesting5。whats_interesting列に検索文脈「DORA RCT」に関連した知見を記載。重要: Pythonスクリプトを一時ファイルとして書き出してから実行すること。"
 ```
+
+### コンテキスト認識検索（原稿テキストから引用を探す）
+ユーザー入力:
+```
+以下の文章の引用を検索してください:
+
+睡眠不足は扁桃体の過活動と前頭前皮質の抑制機能低下を引き起こし[要引用1]、
+これにより情動調節障害が生じる[要引用2]。
+
+CSVファイル: refs_20260302.csv
+```
+
+Claude Codeの分析（codex呼び出し前の中間出力）:
+```
+### 引用 [1]
+- 原文の主張: 「睡眠不足→扁桃体過活動+前頭前皮質の抑制機能低下」
+- 必要なエビデンス: fMRI研究
+- 検索キーワード（英語）: "sleep deprivation amygdala prefrontal cortex fMRI"
+- whats_interesting記載方針: 睡眠不足による扁桃体-前頭前皮質の機能的解離を示したfMRI研究であることを記載
+
+### 引用 [2]
+- 原文の主張: 「睡眠不足による情動調節障害」
+- 必要なエビデンス: レビュー論文またはメタアナリシス
+- 検索キーワード（英語）: "sleep deprivation emotional dysregulation review"
+- whats_interesting記載方針: 睡眠不足と情動調節障害の関連を体系的にまとめた研究であることを記載
+```
+
+この分析結果を含めたリクエストでcodexを実行する。
 
 ### 並列実行（複数テーマを同時検索）
 各codexには個別の一時CSVを指定する:
@@ -176,13 +277,17 @@ codex exec ... "「circadian rhythm bipolar disorder」に関する論文を検�
 
 ## 実行手順
 
-1. ユーザーから検索キーワード（またはリクエスト内容）とCSVファイル名を受け取る
+1. ユーザーから検索リクエストとCSVファイル名を受け取る
 2. プロジェクトディレクトリのパスを確認する
-3. 並列実行が必要か判断する
+3. **検索モードを判断する**
+   - **コンテキスト認識検索**: 原稿テキスト（引用マーカー付き）が提供された場合 → コンテキスト分析を先に実行
+   - **通常検索**: キーワードや論文情報が明示されている場合 → 直接codexを実行
+4. コンテキスト認識検索の場合、Claude Codeが検索インテントを生成する（codex呼び出し前）
+5. 並列実行が必要か判断する
    - **単発実行**: メインCSVに直接書き込み
    - **並列実行**: 各codexは `_tmp_refs_<連番>.csv` に個別出力 → 全完了後にマージ
-4. 上記コマンド形式でCodexを実行
-5. 生成されたCSVファイルの行数を確認して結果を報告
+6. 上記コマンド形式でCodexを実行
+7. 生成されたCSVファイルの行数を確認して結果を報告
 
 ## 注意事項
 
